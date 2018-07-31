@@ -1,0 +1,149 @@
+import pandas as pd
+
+REF="/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa"
+SAMPLES = pd.read_csv("SRR_Acc_list.txt", names=['acc'], squeeze=True).values
+
+ruleorder: gsnap_map_pe > gsnap_map_se
+ruleorder: salmon_quant_pe > salmon_quant_se
+ruleorder: freebayes_call_parallel > merge_chr_vcf > freebayes_call_chrom 
+
+
+rule all:
+    input: bai=expand("aln/{sample}.bam.bai", sample=SAMPLES), \
+	vcf=expand("vcf/freebayes.joint{types}vcf.gz", types=[".",".rbp.",".rbp.imputed."]),\
+	rnaseq_quant = "rnaseq_quant/salmon_gene_counts_lengthScaledTPM.txt"
+
+rule beagle_phasing:
+    input: "vcf/freebayes.joint.rbp.vcf.gz"
+    output: "vcf/freebayes.joint.rbp.imputed.vcf.gz"
+    params: prefix="vcf/freebayes.joint.rbp.imputed"
+    shell: "java -jar ~/app/beagle.r1399.jar gtgl={input} out={params.prefix} usephase=true"
+
+rule read_backed_phasing:
+    input: joint_vcf = "vcf/freebayes.joint.vcf.gz", bams = expand("aln/{sample}.bam", sample=SAMPLES)
+    output: "vcf/freebayes.joint.rbp.vcf.gz"
+    params: log= "vcf/freebayes.joint.rbp.log"
+    shell: "~/anaconda2/envs/whatshap/bin/whatshap phase --max-coverage 20 -o >( sed \"s/\.:\.:\.:\.:\.:\.:\.:\./.\/.:.:.:.:.:.:.:./g\" /dev/stdin | bgzip -c /dev/stdin > {output}) {input.joint_vcf} {input.bams} &>{params.log}"
+
+def get_chroms():
+    chroms = pd.read_table("/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa.fai",names=["CHROM","var1","var2","var3","var4"]).loc[:,"CHROM"].tolist()
+    return chroms
+
+CHROMS = get_chroms()
+
+rule freebayes_call_chrom:
+    input: ref=REF, bams = expand("aln/{sample}.bam", sample=SAMPLES), regions = "aln/covered_regions.bed", bais = expand("aln/{sample}.bam.bai", sample=SAMPLES)
+    output: temp("vcf/chroms/freebayes.joint.chrom_{chrom}.vcf.gz")
+    threads: 1
+    params: this_chrom= "{chrom}"
+    shell: "freebayes -r {params.this_chrom} -f {input.ref} {input.bams} --min-coverage 5 -0 | vt uniq /dev/stdin | vt sort -w 10000 -m local /dev/stdin | vt normalize -r {input.ref} /dev/stdin | bgzip -c /dev/stdin | bcftools filter --SnpGap 10 -i \"QUAL>30\" -O z -o {output} "
+
+rule merge_chr_vcf:
+    input: expand("vcf/chroms/freebayes.joint.chrom_{chrom}.vcf.gz", chrom=CHROMS)
+    output: "vcf/freebayes.joint.vcf.gz"
+    shell: "bcftools concat {input} -O z -o {output}"
+
+rule freebayes_call_parallel:
+    input: ref=REF, bams = expand("aln/{sample}.bam", sample=SAMPLES), regions = "aln/covered_regions.bed", bais = expand("aln/{sample}.bam.bai", sample=SAMPLES)
+    output: "vcf/freebayes.joint.vcf.gz"
+    threads: 16
+    shell: "freebayes-parallel <(sed \"s/	/:/\" {input.regions} | sed \"s/	/\-/\" ) {threads} -f {input.ref} {input.bams} --min-coverage 5 -0 | vt uniq /dev/stdin | vt sort -w 10000 -m local /dev/stdin | vt normalize -r {input.ref} /dev/stdin | bgzip -c /dev/stdin | bcftools filter --SnpGap 10 -i \"QUAL>30\" -O z -o {output} "
+
+
+rule merge_coverage:
+    input: expand("aln/{sample}.bam.coverage.bed", sample=SAMPLES)
+    output: bed_out = "aln/covered_regions.bed", chrom_ids = temp("aln/chrom_ids.txt")
+    threads: 8
+    shell: """cut -f 1 /home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa.fai > {output.chrom_ids} 
+	parallel -k -j {threads} -a aln/chrom_ids.txt \"grep -hw {{1}} {input} | sort -k1,1 -k2,2n | bedtools merge -d 1000\" 2>aln/covered_regions.log > {output.bed_out}"""
+
+rule covered_regions:
+    input: "aln/{sample}.bam"
+    output: "aln/{sample}.bam.coverage.bed"
+    shell: "bedtools genomecov -ibam {input} -bg -split > {output}"
+
+rule vcf_index:
+    input: "{file_name}.vcf.gz"
+    output: "{file_name}.vcf.gz.tbi"
+    shell: "tabix -f {input}"
+
+rule samtools_index:
+    input:
+        "aln/{sample}.bam"
+    output:
+        "aln/{sample}.bam.bai"
+    threads: 2
+    shell:
+        "samtools index -b -@ {threads} {input}"
+
+rule gsnap_map_se:
+    input:
+        fq1 = "fastq/{sample}_1.fastq.gz"
+    output:
+        protected("aln/{sample}.bam")
+    params: sample="{sample}"
+    threads: 8
+    shell:
+        "gsnap -t {threads} --gunzip -N 0 -D ~/anaconda2/envs/ngs/share/ -d b_terrestris --read-group-id={params.sample} --read-group-name={params.sample} --format=sam {input} 2> aln/{params.sample}.log | "
+	"samtools view -@ {threads} -q 30 -S -O BAM /dev/stdin 2> aln/{params.sample}.log |"
+	"samtools sort -@ {threads} -O BAM -T aln/{params.sample} /dev/stdin 2> aln/{params.sample}.log > {output}"
+	#"sambamba view -F \"mapping_quality >= 50\" -  > {output}"
+
+rule gsnap_map_pe:
+    input:
+        fq1 = "fastq/{sample}_1.fastq.gz", fq2 = "fastq/{sample}_2.fastq.gz"
+    output:
+        protected("aln/{sample}.bam")
+    params: sample="{sample}"
+    threads: 8
+    shell:
+        "gsnap -t {threads} --gunzip -N 0 -D ~/anaconda2/envs/ngs/share/ -d b_terrestris --read-group-id={params.sample} --read-group-name={params.sample} --format=sam {input} 2> aln/{params.sample}.log | "
+        "samtools view -@ {threads} -q 30 -S -O BAM /dev/stdin 2> aln/{params.sample}.log |"
+        "samtools sort -@ {threads} -O BAM -T aln/{params.sample} /dev/stdin 2> aln/{params.sample}.log > {output}"
+        #"sambamba view -F \"mapping_quality >= 50\" -  > {output}"
+
+
+rule bcftools_call:
+    input:
+        fa=REF,
+        bam=expand("aln/{sample}.bam", sample=SAMPLES),
+        bai=expand("aln/{sample}.bam.bai", sample=SAMPLES)
+    output:
+        "calls/all.vcf"
+    shell:
+        "samtools mpileup -g -f {input.fa} {input.bam} | "
+        "bcftools call -mv - > {output}"
+
+# RNA seq abundance quantification
+
+rule salmon_quant_se:
+    input: fq1 = "fastq/{sample}_1.fastq.gz"
+    output: protected("rnaseq_quant/salmon/{sample}/quant.sf")
+    params: sample="{sample}"
+    threads: 8
+    log: "rnaseq_quant/salmon/{sample}/quant.sf.run_log"
+    shell: "salmon quant -i ~/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.cdna.all.fa.salmon_index -r {input.fq1} -o rnaseq_quant/salmon/{params.sample} -l A -p {threads} --seqBias --posBias &> {log}"
+
+rule salmon_quant_pe:
+    input: fq1 = "fastq/{sample}_1.fastq.gz", fq2 = "fastq/{sample}_2.fastq.gz"
+    output: protected("rnaseq_quant/salmon/{sample}/quant.sf")
+    params: sample="{sample}"
+    threads: 8
+    log: "rnaseq_quant/salmon/{sample}/quant.sf.run_log"
+    shell: "salmon quant -i ~/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.cdna.all.fa.salmon_index -1 {input.fq1} -2 {input.fq2} -o rnaseq_quant/salmon/{params.sample} -l A -p {threads} --seqBias --posBias &> {log}"
+
+rule tximport_summary:
+    input: expand("rnaseq_quant/salmon/{sample}/quant.sf", sample=SAMPLES)
+    output: gene_lengthScaledTPM = "rnaseq_quant/salmon_gene_counts_lengthScaledTPM.txt", gene_counts = "rnaseq_quant/salmon_gene_counts.txt", gene_length = "rnaseq_quant/salmon_gene_length.txt", tx_counts = "rnaseq_quant/salmon_tx_counts.txt", tx_length = "rnaseq_quant/salmon_tx_length.txt" 
+    script: "scripts/tximpory_salmon_to_gene.R"
+
+
+
+# Kinship matrix
+
+rule seekin_hom_kinship:
+    input: "vcf/freebayes.joint.rbp.imputed.vcf.gz"
+    output: "test3.kin" #"kinship/freebayes.joint.rbp.imputed.kin" #expand("kinship/freebayes.joint.rbp.imputed.{ext}", ext=["inbreed","kin","matrix","matrixID"])
+    threads: 8
+    log: "kinship/freebayes.joint.rbp.imputed.seekin_hom.log"
+    shell: "seekin kinship -i {input} -d DS -p hom -t {threads} -o test3" #kinship/freebayes.joint.rbp.imputed && ls -lh test3.*"
