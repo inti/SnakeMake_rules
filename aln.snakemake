@@ -1,15 +1,38 @@
 import pandas as pd
+from os.path import isfile, islink
 
 REF="/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa"
 SAMPLES = pd.read_csv("SRR_Acc_list.txt", names=['acc'], squeeze=True).values
 
-ruleorder: gsnap_map_pe > gsnap_map_se
+#ruleorder: gsnap_map_pe > gsnap_map_se
 ruleorder: salmon_quant_pe > salmon_quant_se
 ruleorder: freebayes_call_parallel > merge_chr_vcf > freebayes_call_chrom 
 
 
-rule all:
-    input: bai=expand("aln/{sample}.bam.bai", sample=SAMPLES), \
+def get_se_files():
+    back = list()
+    for samp in SAMPLES:
+        file_str_1 = ''.join(("fastq/",samp,"_1.fastq.gz"))
+        file_str_2 = ''.join(("fastq/",samp,"_2.fastq.gz"))
+
+	if isfile(file_str_2) or islink(file_str_2):
+            pass
+        elif isfile(file_str_1) or islink(file_str_1):
+            back.append(samp)
+    return(back)
+
+def get_pe_files():
+    back = list()
+    for samp in SAMPLES:
+        file_str_1 = ''.join(("fastq/",samp,"_1.fastq.gz"))
+        file_str_2 = ''.join(("fastq/",samp,"_2.fastq.gz"))
+
+        if (isfile(file_str_2) or islink(file_str_2)) and (isfile(file_str_2) or islink(file_str_2)):
+            back.append(samp)
+    return(back)
+
+rule all: #bai=expand("aln/{sample}.bam.bai", sample=get_se_files()), bai_pe=expand("aln/{pe_sample}.bam.bai", sample=get_pe_files()),\
+    input: bai = expand("aln/{sample}.bam.bai", sample=SAMPLES),\
 	vcf=expand("vcf/freebayes.joint{types}vcf.gz", types=[".",".rbp.",".rbp.imputed."]),\
 	rnaseq_quant = "rnaseq_quant/salmon_gene_counts_lengthScaledTPM.txt"
 
@@ -32,7 +55,7 @@ def get_chroms():
 CHROMS = get_chroms()
 
 rule freebayes_call_chrom:
-    input: ref=REF, bams = expand("aln/{sample}.bam", sample=SAMPLES), regions = "aln/covered_regions.bed", bais = expand("aln/{sample}.bam.bai", sample=SAMPLES)
+    input: ref=REF, bams = expand("aln/{sample}.bam", sample=SAMPLES), regions = expand("aln/covered_regions_{region_subset}", region_subset=range(1,100)), bais = expand("aln/{sample}.bam.bai", sample=SAMPLES)
     output: temp("vcf/chroms/freebayes.joint.chrom_{chrom}.vcf.gz")
     threads: 1
     params: this_chrom= "{chrom}"
@@ -62,6 +85,15 @@ rule covered_regions:
     output: "aln/{sample}.bam.coverage.bed"
     shell: "bedtools genomecov -ibam {input} -bg -split > {output}"
 
+rule split_bed:
+    input: "aln/covered_regions.bed"
+    output: expand("aln/covered_regions_{region_subset}", region_subset=range(1,100))
+    shell: """split -n 3 --numeric-suffixes=1  aln/covered_regions.bed aln/covered_regions_
+              for i in `seq 1 6`;
+              do
+                  rename aln/covered_regions_0 aln/covered_regions_ aln/covered_regions_*
+              done"""
+
 rule vcf_index:
     input: "{file_name}.vcf.gz"
     output: "{file_name}.vcf.gz.tbi"
@@ -76,32 +108,39 @@ rule samtools_index:
     shell:
         "samtools index -b -@ {threads} {input}"
 
+def get_files_str(wildcards):
+    samp = wildcards.sample
+    print(samp)
+    file_str_1 = ''.join(("fastq/",samp,"_1.fastq.gz"))
+    file_str_2 = ''.join(("fastq/",samp,"_2.fastq.gz"))
+    if (isfile(file_str_2) or islink(file_str_2)) and (isfile(file_str_2) or islink(file_str_2)):
+        print([file_str_1,file_str_2])
+        return [file_str_1 , file_str_2]
+    elif isfile(file_str_1) or islink(file_str_1):
+        print(file_str_1)
+        return file_str_1
+
 rule gsnap_map_se:
-    input:
-        fq1 = "fastq/{sample}_1.fastq.gz"
-    output:
-        protected("aln/{sample}.bam")
-    params: sample="{sample}"
+    input: get_files_str
+# fq1 = "se_fq/{sample}_1.fastq.gz"
+    output: protected("aln/{sample}.bam")
     threads: 8
     shell:
-        "gsnap -t {threads} --gunzip -N 0 -D ~/anaconda2/envs/ngs/share/ -d b_terrestris --read-group-id={params.sample} --read-group-name={params.sample} --format=sam {input} 2> aln/{params.sample}.log | "
-	"samtools view -@ {threads} -q 30 -S -O BAM /dev/stdin 2> aln/{params.sample}.log |"
-	"samtools sort -@ {threads} -O BAM -T aln/{params.sample} /dev/stdin 2> aln/{params.sample}.log > {output}"
+        "gsnap -t {threads} --gunzip -N 0 -D ~/anaconda2/envs/ngs/share/ -d b_terrestris --read-group-id={wildcards.sample} --read-group-name={wildcards.sample} --format=sam {input} 2> aln/{wildcards.sample}.log | "
+	"samtools view -@ {threads} -q 30 -S -O BAM /dev/stdin 2> aln/{wildcards.sample}.log |"
+	"samtools sort -@ {threads} -O BAM -T aln/{wildcards.sample} /dev/stdin 2> aln/{wildcards.sample}.log > {output}"
 	#"sambamba view -F \"mapping_quality >= 50\" -  > {output}"
 
-rule gsnap_map_pe:
-    input:
-        fq1 = "fastq/{sample}_1.fastq.gz", fq2 = "fastq/{sample}_2.fastq.gz"
-    output:
-        protected("aln/{sample}.bam")
-    params: sample="{sample}"
-    threads: 8
-    shell:
-        "gsnap -t {threads} --gunzip -N 0 -D ~/anaconda2/envs/ngs/share/ -d b_terrestris --read-group-id={params.sample} --read-group-name={params.sample} --format=sam {input} 2> aln/{params.sample}.log | "
-        "samtools view -@ {threads} -q 30 -S -O BAM /dev/stdin 2> aln/{params.sample}.log |"
-        "samtools sort -@ {threads} -O BAM -T aln/{params.sample} /dev/stdin 2> aln/{params.sample}.log > {output}"
-        #"sambamba view -F \"mapping_quality >= 50\" -  > {output}"
-
+#rule gsnap_map_pe:
+#    input: fq1 = "pe_fq/{sample}_1.fastq.gz", fq2 = "pe_fq/{sample}_2.fastq.gz"
+#    output: protected("pe_bam/{sample}.bam")
+#    params: sample="{sample}"
+#    threads: 8
+#    shell:
+#        "gsnap -t {threads} --gunzip -N 0 -D ~/anaconda2/envs/ngs/share/ -d b_terrestris --read-group-id={params.sample} --read-group-name={params.sample} --format=sam {input} 2> aln/{params.sample}.log | "
+#        "samtools view -@ {threads} -q 30 -S -O BAM /dev/stdin 2> aln/{params.sample}.log |"
+#        "samtools sort -@ {threads} -O BAM -T aln/{params.sample} /dev/stdin 2> aln/{params.sample}.log > {output}"
+#        #"sambamba view -F \"mapping_quality >= 50\" -  > {output}"
 
 rule bcftools_call:
     input:
@@ -117,7 +156,7 @@ rule bcftools_call:
 # RNA seq abundance quantification
 
 rule salmon_quant_se:
-    input: fq1 = "fastq/{sample}_1.fastq.gz"
+    input: fq1 = "se_fq/{sample}_1.fastq.gz"
     output: protected("rnaseq_quant/salmon/{sample}/quant.sf")
     params: sample="{sample}"
     threads: 8
@@ -125,7 +164,7 @@ rule salmon_quant_se:
     shell: "salmon quant -i ~/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.cdna.all.fa.salmon_index -r {input.fq1} -o rnaseq_quant/salmon/{params.sample} -l A -p {threads} --seqBias --posBias &> {log}"
 
 rule salmon_quant_pe:
-    input: fq1 = "fastq/{sample}_1.fastq.gz", fq2 = "fastq/{sample}_2.fastq.gz"
+    input: fq1 = "fastq/pe_fastq/{sample}_1.fastq.gz", fq2 = "pe_fq/{sample}_2.fastq.gz"
     output: protected("rnaseq_quant/salmon/{sample}/quant.sf")
     params: sample="{sample}"
     threads: 8
