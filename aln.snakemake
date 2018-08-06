@@ -1,4 +1,5 @@
 import pandas as pd
+import os
 from os.path import isfile, islink
 
 REF="/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa"
@@ -8,6 +9,10 @@ SAMPLES = pd.read_csv("SRR_Acc_list.txt", names=['acc'], squeeze=True).values
 ruleorder: salmon_quant_pe > salmon_quant_se
 ruleorder: freebayes_call_parallel > merge_chr_vcf > freebayes_call_chrom 
 
+def get_sample_ids():
+    files = os.listdir("fastq/")
+    _ids = pd.unique([ f.replace(".fastq.gz","").replace("_1","").replace("_2","") for f in files])
+    return _ids
 
 def get_se_files():
     back = list()
@@ -30,6 +35,8 @@ def get_pe_files():
         if (isfile(file_str_2) or islink(file_str_2)) and (isfile(file_str_2) or islink(file_str_2)):
             back.append(samp)
     return(back)
+
+SAMPLES = get_sample_ids()
 
 rule all: #bai=expand("aln/{sample}.bam.bai", sample=get_se_files()), bai_pe=expand("aln/{pe_sample}.bam.bai", sample=get_pe_files()),\
     input: bai = expand("aln/{sample}.bam.bai", sample=SAMPLES),\
