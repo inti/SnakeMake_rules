@@ -7,7 +7,11 @@ REF="/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna
 
 #ruleorder: gsnap_map_pe > gsnap_map_se
 #ruleorder: salmon_quant_pe > salmon_quant_se
-ruleorder: freebayes_call_parallel > merge_chr_vcf > freebayes_call_chrom 
+#ruleorder: freebayes_call_parallel > merge_chr_vcf > freebayes_call_chrom 
+
+def get_chroms():
+    chroms = pd.read_table("/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa.fai",names=["CHROM","var1","var2","var3","var4"]).loc[:,"CHROM"].tolist()
+    return chroms
 
 def get_sample_ids():
     files = os.listdir("fastq/")
@@ -15,6 +19,7 @@ def get_sample_ids():
     return _ids
 
 SAMPLES = get_sample_ids()
+N_CALL_REGIONS_IDX=range(1,100)
 
 rule all: #bai=expand("aln/{sample}.bam.bai", sample=get_se_files()), bai_pe=expand("aln/{pe_sample}.bam.bai", sample=get_pe_files()),\
     input: bai = expand("aln/{sample}.bam.bai", sample=SAMPLES),\
@@ -33,35 +38,22 @@ rule read_backed_phasing:
     params: log= "vcf/freebayes.joint.rbp.log"
     shell: "~/anaconda2/envs/whatshap/bin/whatshap phase --max-coverage 20 -o >( sed \"s/\.:\.:\.:\.:\.:\.:\.:\./.\/.:.:.:.:.:.:.:./g\" /dev/stdin | bgzip -c /dev/stdin > {output}) {input.joint_vcf} {input.bams} &>{params.log}"
 
-def get_chroms():
-    chroms = pd.read_table("/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa.fai",names=["CHROM","var1","var2","var3","var4"]).loc[:,"CHROM"].tolist()
-    return chroms
-
-CHROMS = get_chroms()
-
-rule freebayes_call_chrom:
-    input: ref=REF, bams = expand("aln/{sample}.bam", sample=SAMPLES), regions = expand("aln/covered_regions_{region_subset}", region_subset=range(1,100)), bais = expand("aln/{sample}.bam.bai", sample=SAMPLES)
-    output: temp("vcf/chroms/freebayes.joint.chrom_{chrom}.vcf.gz")
+rule freebayes_call_region:
+    input: ref=REF, bams = expand("aln/{sample}.bam", sample=SAMPLES), region = "aln/covered_regions_{region_subset}", bais = expand("aln/{sample}.bam.bai", sample=SAMPLES)
+    output: temp("vcf/regions/freebayes.joint.region_{region_subset}.vcf.gz")
     threads: 1
-    params: this_chrom= "{chrom}"
-    shell: "freebayes -r {params.this_chrom} -f {input.ref} {input.bams} --min-coverage 5 -0 | vt uniq /dev/stdin | vt sort -w 10000 -m local /dev/stdin | vt normalize -r {input.ref} /dev/stdin | bgzip -c /dev/stdin | bcftools filter --SnpGap 10 -i \"QUAL>30\" -O z -o {output} "
+    resources: io_score = 10
+    shell: "(freebayes -t {input.region} -f {input.ref} {input.bams} --min-coverage 5 -0 | vt sort -m full /dev/stdin | vt uniq /dev/stdin ) | vt normalize -r {input.ref} /dev/stdin | bgzip -c /dev/stdin | bcftools filter --SnpGap 10 -i \"QUAL>30\" -O z -o {output} "
 
-rule merge_chr_vcf:
-    input: expand("vcf/chroms/freebayes.joint.chrom_{chrom}.vcf.gz", chrom=CHROMS)
+rule merge_region_vcf:
+    input: dynamic("vcf/regions/freebayes.joint.region_{region_subset}.vcf.gz")
     output: "vcf/freebayes.joint.vcf.gz"
-    shell: "bcftools concat {input} -O z -o {output}"
-
-rule freebayes_call_parallel:
-    input: ref=REF, bams = expand("aln/{sample}.bam", sample=SAMPLES), regions = "aln/covered_regions.bed", bais = expand("aln/{sample}.bam.bai", sample=SAMPLES)
-    output: "vcf/freebayes.joint.vcf.gz"
-    threads: 16
-    shell: "freebayes-parallel <(sed \"s/	/:/\" {input.regions} | sed \"s/	/\-/\" ) {threads} -f {input.ref} {input.bams} --min-coverage 5 -0 | vt uniq /dev/stdin | vt sort -w 10000 -m local /dev/stdin | vt normalize -r {input.ref} /dev/stdin | bgzip -c /dev/stdin | bcftools filter --SnpGap 10 -i \"QUAL>30\" -O z -o {output} "
-
+    shell: "(vt cat {input} | vt sort -m full /dev/stdin ) | bgzip -c /dev/stdin > {output}"
 
 rule merge_coverage:
     input: expand("aln/{sample}.bam.coverage.bed", sample=SAMPLES)
     output: bed_out = "aln/covered_regions.bed", chrom_ids = temp("aln/chrom_ids.txt")
-    threads: 8
+    threads: 24
     shell: """cut -f 1 /home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa.fai > {output.chrom_ids} 
 	parallel -k -j {threads} -a aln/chrom_ids.txt \"grep -hw {{1}} {input} | sort -k1,1 -k2,2n | bedtools merge -d 1000\" 2>aln/covered_regions.log > {output.bed_out}"""
 
@@ -72,12 +64,8 @@ rule covered_regions:
 
 rule split_bed:
     input: "aln/covered_regions.bed"
-    output: expand("aln/covered_regions_{region_subset}", region_subset=range(1,100))
-    shell: """split -n 3 --numeric-suffixes=1  aln/covered_regions.bed aln/covered_regions_
-              for i in `seq 1 6`;
-              do
-                  rename aln/covered_regions_0 aln/covered_regions_ aln/covered_regions_*
-              done"""
+    output: dynamic("aln/covered_regions_{region_subset}")
+    shell: "cat {input} | parallel -j1 --pipe -N1000 'cat > aln/covered_regions_{{#}}'"
 
 rule vcf_index:
     input: "{file_name}.vcf.gz"
@@ -95,6 +83,9 @@ rule samtools_index:
 
 def get_files_str(wildcards):
     samp = wildcards.sample
+    return get_files_str_from_str(samp)
+
+def get_files_str_from_str(samp):
     file_str_1 = ''.join(("fastq/",samp,"_1.fastq.gz"))
     file_str_2 = ''.join(("fastq/",samp,"_2.fastq.gz"))
     if (isfile(file_str_2) or islink(file_str_2)) and (isfile(file_str_2) or islink(file_str_2)):
@@ -104,7 +95,6 @@ def get_files_str(wildcards):
 
 rule gsnap_map:
     input: get_files_str
-# fq1 = "se_fq/{sample}_1.fastq.gz"
     output: protected("aln/{sample}.bam")
     threads: 8
     shell:
@@ -137,16 +127,20 @@ rule bcftools_call:
 
 # RNA seq abundance quantification
 
+def get_salmon_reads_cmd(in_):
+    if len(in_) == 1:
+         return "-r " + in_
+    else:
+         return "-1 " + in_[0] + " -2 " + in_[1]
+
 rule salmon_quant_se:
     input: get_files_str
-    output: protected("rnaseq_quant/salmon/{sample}/quant.sf")
+    output: protected("rnaseq_quant/salmon/{sample}/quant.sf"),"rnaseq_quant/salmon/{sample}/cmd_info.json", "rnaseq_quant/salmon/{sample}/lib_format_counts.json", "rnaseq_quant/salmon/{sample}/quant.sf.run_log"
     threads: 8
     log: "rnaseq_quant/salmon/{sample}/quant.sf.run_log"
     run:
-        if len(input) == 1:
-            shell: "salmon quant -i ~/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.cdna.all.fa.salmon_index -r {input} -o rnaseq_quant/salmon/{wildcards.sample} -l A -p {threads} --seqBias --posBias "
-        else:
-            shell: "salmon quant -i ~/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.cdna.all.fa.salmon_index -1 {input[0]} -2 {input[1]} -o rnaseq_quant/salmon/{params.sample} -l A -p {threads} --seqBias --posBias"
+        reads_cmd = get_salmon_reads_cmd(input)
+        shell("salmon quant -i ~/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.cdna.all.fa.salmon_index {reads_cmd} -o rnaseq_quant/salmon/{wildcards.sample} -l A -p {threads} --seqBias --posBias &> {log}")
 
 #rule salmon_quant_pe:
 #    input: fq1 = "fastq/pe_fastq/{sample}_1.fastq.gz", fq2 = "pe_fq/{sample}_2.fastq.gz"
