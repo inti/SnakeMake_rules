@@ -46,6 +46,7 @@ rule freebayes_call_region:
     output: temp("vcf/regions/freebayes.joint.region_{region_subset}.vcf.gz")
     threads: 1
     resources: io_score = 10
+    priority: 100
     shell: "freebayes -@ {input.known_vars} --only-use-input-alleles -t {input.region} -f {input.ref} {input.bams} --min-alternate-count 1 --min-alternate-fraction 0.01 --min-coverage 5 -0 | vt sort -m full /dev/stdin | vt uniq /dev/stdin | vt normalize -r {input.ref} /dev/stdin | bgzip -c /dev/stdin | bcftools filter --SnpGap 10 -i \"QUAL>30\" -O z -o {output} "
 
 rule merge_region_vcf:
@@ -73,6 +74,7 @@ rule freebayes_call_region_per_sample:
 rule merge_sample_region_vcf:
     input: vcf = expand("vcf/call/{sample}.freebayes.call.region_{sample_subset}.vcf.gz", sample_subset=N_CALL_REGIONS_IDX, sample="{sample}"), vcf_idx = expand("vcf/call/{sample}.freebayes.call.region_{sample_subset}.vcf.gz.tbi", sample_subset=N_CALL_REGIONS_IDX, sample="{sample}")
     output: raw = "vcf/call/{sample}.freebayes.call.vcf.gz", snps = "vcf/call/{sample}.freebayes.call.snps.vcf.gz", tmp = temp("vcf/call/{sample}.freebayes.call.TMP.vcf.gz")
+    priority: 80
     shell: """vt cat {input.vcf} | bgzip -c /dev/stdin > {output.tmp}
               tabix -f {output.tmp}
               vt sort -m chrom {output.tmp} | vt sort -w 10000 -m local /dev/stdin | bgzip -c /dev/stdin > {output.raw}
