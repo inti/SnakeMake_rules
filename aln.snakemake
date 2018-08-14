@@ -9,7 +9,7 @@ REF="/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna
 #ruleorder: salmon_quant_pe > salmon_quant_se
 #ruleorder: freebayes_call_parallel > merge_chr_vcf > freebayes_call_chrom 
 
-localrules: all, split_sample_bed, split_bed
+localrules: all, vcf_index#, split_sample_bed, split_bed
 
 def get_chroms():
     chroms = pd.read_table("/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa.fai",names=["CHROM","var1","var2","var3","var4"]).loc[:,"CHROM"].tolist()
@@ -69,7 +69,7 @@ rule freebayes_call_region_per_sample:
     output: temp("vcf/call/{sample}.freebayes.call.region_{sample_subset}.vcf.gz")
     threads: 1
     resources: io_score = 10
-    shell: "freebayes -t {input.region} -f {input.ref} {input.bams} --min-alternate-count 1 --min-alternate-fraction 0.01 --min-coverage 5 -0 | vt sort -m full /dev/stdin | vt uniq /dev/stdin | vt normalize -r {input.ref} /dev/stdin | bgzip -c /dev/stdin | bcftools filter --SnpGap 10 -i \"QUAL>30\" -O z -o {output} "
+    shell: "(freebayes -t {input.region} -f {input.ref} {input.bams} --min-alternate-count 1 --min-alternate-fraction 0.01 --min-coverage 5 -0 | vt sort -m full /dev/stdin | vt uniq /dev/stdin | vt normalize -r {input.ref} /dev/stdin | bgzip -c /dev/stdin) | bcftools filter --SnpGap 10 -i \"QUAL>30\" -O z -o {output} "
 
 rule merge_sample_region_vcf:
     input: vcf = expand("vcf/call/{sample}.freebayes.call.region_{sample_subset}.vcf.gz", sample_subset=N_CALL_REGIONS_IDX, sample="{sample}"), vcf_idx = expand("vcf/call/{sample}.freebayes.call.region_{sample_subset}.vcf.gz.tbi", sample_subset=N_CALL_REGIONS_IDX, sample="{sample}")
@@ -199,10 +199,20 @@ rule seekin_hom_kinship:
     shell: "seekin kinship -i {input} -d DS -p hom -t {threads} -o test3" #kinship/freebayes.joint.rbp.imputed && ls -lh test3.*"
 
 # phASER ASE
+
+def bam_is_pe(wildcards):
+    samp = wildcards.sample
+    file_str_1 = ''.join(("fastq/",samp,"_1.fastq.gz"))
+    file_str_2 = ''.join(("fastq/",samp,"_2.fastq.gz"))
+    if (isfile(file_str_2) or islink(file_str_2)) and (isfile(file_str_2) or islink(file_str_2)):
+        return 1
+    elif isfile(file_str_1) or islink(file_str_1):
+        return 0
+
 rule phaser:
     input: vcf = "vcf/freebayes.joint.vcf.gz", bam = "aln/{sample}.bam"
     output: expand("phaser/{sample}/{sample}.{ext}", ext=["allele_config.txt","haplotypes.txt","variant_connections.txt","allelic_counts.txt","haplotypic_counts.txt","vcf.gz"], sample="{sample}")
-    params: is_pe= 0
+    params: is_pe= bam_is_pe
     log: "phaser/{sample}/{sample}.phaser.log"
     shell: "~/anaconda2/envs/ngs/bin/python ~/app/phaser/phaser/phaser.py --vcf {input.vcf} --bam {input.bam} --paired_end {params.is_pe} --mapq 30 --baseq 10 --sample {wildcards.sample} --o phaser/{wildcards.sample}/{wildcards.sample} &> {log}"
 
