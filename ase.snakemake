@@ -1,23 +1,40 @@
+localrules: g2gtools_extract
 
-
-rule g2gtools_vcf_to_diploid_tx:
+rule g2gtools_vcf_to_gtf:
      input: vcf_joint = "vcf/freebayes.joint.rbp.imputed.vcf.gz"
-     output: vci = "emase/{sample}/{sample}.vci.gz", fa = "emase/{sample}/{sample}.fa", gtf = "emase/{sample}/{sample}.gtf", tx_fa = "emase/{sample}/{sample}.transcripts.fa", genes_fa = "emase/{sample}/{sample}.genes.fa"
+     output: vci = "emase/{sample}/{sample}.vci.gz", patched_fa = temp("emase/{sample}/{sample}.patched.fa"), fa = "emase/{sample}/{sample}.fa", gtf = "emase/{sample}/{sample}.gtf"
      log: "emase/{sample}/{sample}.g2gtools.log"
      threads: 20
      params: gtf=GTF, ref=REF
      shell: "~/anaconda2/envs/g2gtools/bin/g2gtools vcf2vci  -o emase/{wildcards.sample}/{wildcards.sample}.vci --diploid -s {wildcards.sample} -i {input.vcf_joint} &> {log} && \
-            ~/anaconda2/envs/g2gtools/bin/g2gtools patch -i {params.ref} -c {output.vci} -o {output.fa} -p {threads} &> {log} && \
-            ~/anaconda2/envs/g2gtools/bin/g2gtools transform -i {output.fa} -c {output.vci} -o {output.fa} -p {threads} &> {log} && \
-            ~/anaconda2/envs/g2gtools/bin/g2gtools convert -i {params.gtf} -c {output.vci} -o {output.gtf} &> {log} && \
-            NUMOFLINES=$(wc -l < \"{output.gtf}\") && N_4_SPLIT=$(($(( $NUMOFLINES / 100 )) + 1)) && \
-            cat {output.gtf} | parallel -j1 --pipe -N$N_4_SPLIT 'cat > {output.gtf}_{{#}}' &> /dev/null && \
-            parallel -j {threads} ~/anaconda2/envs/g2gtools/bin/g2gtools gtf2db -i {output.gtf}_{{1}} -o emase/{wildcards.sample}/{wildcards.sample}.{{1}}.db ::: {{1..100}} && \
-            ~/anaconda2/envs/g2gtools/bin/g2gtools extract -i {output.fa} -db emase/{wildcards.sample}/{wildcards.sample}.1.db --transcripts > {output.tx_fa} && \
-            ~/anaconda2/envs/g2gtools/bin/g2gtools extract -i {output.fa} -db emase/{wildcards.sample}/{wildcards.sample}.1.db --genes > {output.genes_fa} && \
-            parallel -j1  ~/anaconda2/envs/g2gtools/bin/g2gtools extract -i {output.fa} -db emase/{wildcards.sample}/{wildcards.sample}.{{1}}.db --transcripts >> {output.tx_fa} ::: {{2..100}} && \
-            parallel -j1  ~/anaconda2/envs/g2gtools/bin/g2gtools extract -i {output.fa} -db emase/{wildcards.sample}/{wildcards.sample}.{{1}}.db --genes >> {output.genes_fa} ::: {{2..100}} && \
-            rm -f {output.gtf}_*"""
+            ~/anaconda2/envs/g2gtools/bin/g2gtools patch -i {params.ref} -c {output.vci} -o {output.patched_fa} -p {threads} &>> {log} && \
+            ~/anaconda2/envs/g2gtools/bin/g2gtools transform -i {output.patched_fa} -c {output.vci} -o {output.fa} -p {threads} &>> {log} && \
+            ~/anaconda2/envs/g2gtools/bin/g2gtools convert -i {params.gtf} -c {output.vci} -o {output.gtf} &>> {log}"""
+
+rule g2gtools_gtf2db:
+    input: gtf = "emase/{sample}/{sample}.gtf"
+    output: db = "emase/{sample}/{sample}.db"
+    log: "emase/{sample}/{sample}.gtf2db.log"
+    threads: 1
+    shell: "~/anaconda2/envs/g2gtools/bin/g2gtools gtf2db -i {input.gtf} -o {output.db} &> {log}"
+
+rule g2gtools_extract:
+    input: db = "emase/{sample}/{sample}.db", fa = "emase/{sample}/{sample}.fa"
+    output: genes_fa="emase/{sample}/{sample}.genes.fa", tx_fa = "emase/{sample}/{sample}.transcripts.fa"
+    log: "emase/{sample}/{sample}.extract.log"
+    threads: 1
+    shell: """~/anaconda2/envs/g2gtools/bin/g2gtools extract -i {input.fa} -db {input.db} --transcripts > {output.tx_fa}&& \
+              ~/anaconda2/envs/g2gtools/bin/g2gtools extract -i {input.fa} -db {input.db} --genes > {output.genes_fa}"""
+    
+
+#            NUMOFLINES=$(wc -l < \"{output.gtf}\") && N_4_SPLIT=$(($(( $NUMOFLINES / 100 )) + 1)) && \
+#            cat {output.gtf} | parallel -j1 --pipe -N$N_4_SPLIT 'cat > {output.gtf}_{{#}}' &> /dev/null && \
+#            parallel -j {threads} ~/anaconda2/envs/g2gtools/bin/g2gtools gtf2db -i {output.gtf}_{{1}} -o emase/{wildcards.sample}/{wildcards.sample}.{{1}}.db ::: {{1..100}} && \
+#            ~/anaconda2/envs/g2gtools/bin/g2gtools extract -i {output.fa} -db emase/{wildcards.sample}/{wildcards.sample}.1.db --transcripts > {output.tx_fa} && \
+#            ~/anaconda2/envs/g2gtools/bin/g2gtools extract -i {output.fa} -db emase/{wildcards.sample}/{wildcards.sample}.1.db --genes > {output.genes_fa} && \
+#           parallel -j1  ~/anaconda2/envs/g2gtools/bin/g2gtools extract -i {output.fa} -db emase/{wildcards.sample}/{wildcards.sample}.{{1}}.db --transcripts >> {output.tx_fa} ::: {{2..100}} && \
+#            parallel -j1  ~/anaconda2/envs/g2gtools/bin/g2gtools extract -i {output.fa} -db emase/{wildcards.sample}/{wildcards.sample}.{{1}}.db --genes >> {output.genes_fa} ::: {{2..100}} && \
+#            rm -f {output.gtf}_*"""
 
 
 

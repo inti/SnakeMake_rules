@@ -30,7 +30,7 @@ N_CALL_REGIONS_IDX=range(1,25)
 rule all: #bai=expand("aln/{sample}.bam.bai", sample=get_se_files()), bai_pe=expand("aln/{pe_sample}.bam.bai", sample=get_pe_files()),\
     input: bai = expand("aln/{sample}.bam.bai", sample=SAMPLES),\
 	vcf=expand("vcf/freebayes.joint.snps{types}vcf.gz", types=[".",".rbp.",".rbp.imputed."]),\
-	rnaseq_quant = "rnaseq_quant/salmon_gene_counts_lengthScaledTPM.txt",\
+	#rnaseq_quant = "rnaseq_quant/salmon_gene_counts_lengthScaledTPM.txt",\
         phaser_ase = expand("phaser/{sample}/{sample}.phaser_ase.{feat_type}.txt", feat_type=["transcript","gene"], sample=SAMPLES)
 
 rule beagle_phasing:
@@ -46,7 +46,7 @@ rule read_backed_phasing:
     shell: "~/anaconda2/envs/whatshap/bin/whatshap phase --max-coverage 20 -o >( sed \"s/\.:\.:\.:\.:\.:\.:\.:\./.\/.:.:.:.:.:.:.:./g\" /dev/stdin | bgzip -c /dev/stdin > {output}) {input.joint_vcf} {input.bams} &>{params.log}"
 
 rule freebayes_call_region:
-    input: ref=REF, bams = expand("aln/{sample}.bam", sample=SAMPLES), region = "aln/covered_regions_{region_subset}", bais = expand("aln/{sample}.bam.bai", sample=SAMPLES), known_vars = "vcf/call/freebayes.call.region_{region_subset}.vcf.gz"
+    input: ref=REF, bams = expand("aln/{sample}.bam", sample=SAMPLES), region = "aln/covered_regions_{region_subset}", bais = expand("aln/{sample}.bam.bai", sample=SAMPLES), known_vars = "vcf/call/freebayes.call.region_{region_subset}.vcf.gz", known_vars_tbi = "vcf/call/freebayes.call.region_{region_subset}.vcf.gz.tbi"
     output: temp("vcf/regions/freebayes.joint.region_{region_subset}.vcf.gz")
     threads: 1
     resources: io_score = 10
@@ -58,7 +58,7 @@ rule merge_region_vcf:
     output: raw = "vcf/freebayes.joint.vcf.gz", snps = "vcf/freebayes.joint.snps.vcf.gz", tmp = temp("vcf/freebayes.joint.TMP.vcf.gz")
     shell: """vt cat {input.vcf} | bgzip -c /dev/stdin > {output.tmp}
               tabix -f {output.tmp}
-              vt sort -m chrom {output.tmp} | vt sort -w 10000 -m local /dev/stdin | bgzip -c /dev/stdin > {output.raw}
+              vt sort -m chrom {output.tmp} | vt sort -m full /dev/stdin | bgzip -c /dev/stdin > {output.raw}
 	      bcftools filter -i 'TYPE=\"snp\"' {output.raw} -O z -o {output.snps}""" 
 
 rule merge_coverage:
@@ -108,7 +108,8 @@ rule split_bed:
 rule split_call_vcf_covered_regions:
     input: vcf="vcf/call/freebayes.call.vcf.gz", region = "aln/covered_regions_{region_subset}"
     output: vcf="vcf/call/freebayes.call.region_{region_subset}.vcf.gz"
-    shell: "bcftools view -h {input.vcf} | cut -f 1-11 | bgzip -c /dev/stdin > {output} && bedtools intersect -a {input.region} -b {input.vcf} -wb | cut -f 1-11 | bgzip -c /dev/stdin >> {output}"
+    shell: "bcftools view -h {input.vcf} | cut -f 1-11 | bgzip -c /dev/stdin > {output} && bedtools intersect -a {input.region} -b {input.vcf} -wb | cut -f 1-11 | bgzip -c /dev/stdin >> {output} && "
+           "vt sort -m full {output} | bgzip -c /dev/stdin > {output}.tmp && mv -f {output}.tmp {output}"
 
 rule vcf_index:
     input: "{file_name}.vcf.gz"
@@ -137,14 +138,26 @@ def get_files_str_from_str(samp):
         return file_str_1
 
 rule gsnap_map:
-    input: get_files_str
-    output: protected("aln/{sample}.bam")
-    threads: 16
+    input: fastq= get_files_str, ref = REF, gtf = GTF 
+    output: bam =protected("aln/{sample}.bam"), tmp_bam = temp("aln/{sample}.tmp_.bam"), tmp_transIndel = temp("aln/{sample}.transIndel.bam") 
+    threads: 10
+    log: "aln/{sample}.log"
     shell:
-        "gsnap -t {threads} --gunzip -N 0 -D ~/anaconda2/envs/ngs/share/ -d b_terrestris --read-group-id={wildcards.sample} --read-group-name={wildcards.sample} --format=sam {input} 2> aln/{wildcards.sample}.log | "
-	"samtools view -@ {threads} -q 30 -S -O BAM /dev/stdin 2> aln/{wildcards.sample}.log |"
-	"samtools sort -@ {threads} -O BAM -T aln/{wildcards.sample} /dev/stdin 2> aln/{wildcards.sample}.log > {output}"
-	#"sambamba view -F \"mapping_quality >= 50\" -  > {output}"
+        "gsnap -t {threads} --gunzip -N 0 -s ~/anaconda2/envs/ngs/share/b_terrestris/b_terrestris.maps/b_terrestris.splicesites.iit -D ~/anaconda2/envs/ngs/share/ -d b_terrestris --read-group-id={wildcards.sample} --read-group-name={wildcards.sample} --format=sam {input.fastq} 2> {log} | "
+	"samtools view -@ {threads} -q 30 -S -O BAM /dev/stdin 2> {log} |"
+	"samtools sort -@ {threads} -O BAM -T aln/{wildcards.sample} /dev/stdin 2> {log} | "
+        "~/anaconda2/envs/ngs/bin/python ~/app/transIndel/transIndel_build_RNA.py -i /dev/stdin -r {input.ref} -g {input.gtf} -o {output.tmp_transIndel} 2>{log} && "
+	"cp -fv {output.tmp_transIndel} {output.bam} &> {log}"
+
+rule gsnap_remap:
+    input: fastq= get_files_str, snp_iit = "gmap_db/b_terrestris/b_terrestris.maps/snp.iit"
+    output: protected("aln_remap/{sample}.bam")
+    threads: 10
+    log: "aln_remap/{sample}.log"
+    shell:
+        "gsnap -t {threads} --gunzip -N 0 -s -v {input.snp_iit} -D gmap_db/ -d b_terrestris --read-group-id={wildcards.sample} --read-group-name={wildcards.sample} --format=sam {input.fastq} 2> {log} | "
+        "samtools view -@ {threads} -q 30 -S -O BAM /dev/stdin 2> {log} |"
+        "samtools sort -@ {threads} -O BAM -T aln/{wildcards.sample} /dev/stdin 2> {log} > {output}"
 
 #rule gsnap_map_pe:
 #    input: fq1 = "pe_fq/{sample}_1.fastq.gz", fq2 = "pe_fq/{sample}_2.fastq.gz"
@@ -168,6 +181,14 @@ rule bcftools_call:
         "samtools mpileup -g -f {input.fa} {input.bam} | "
         "bcftools call -mv - > {output}"
 
+rule gmap_db_snp_iit:
+    input: "vcf/freebayes.joint.rbp.imputed.vcf.gz"
+    output: snp_iit = "gmap_db/b_terrestris/b_terrestris.maps/snp.iit", temp_iit = temp("gmap_db/tmp_snp.iit")
+    log: "gmap_db/snp.iit.log"
+    shell: "ln -fs /home/ipedroso/anaconda2/envs/ngs/share/b_terrestris gmap_db && "
+           "gunzip -c {input} | vcf_iit | iit_store -o {output.temp_iit} &> {log} && "
+           "snpindex -D ./gmap_db -d b_terrestris -v snp {output.temp_iit} -V ./gmap_db/b_terrestris/b_terrestris.maps &> {log}"
+
 # RNA seq abundance quantification
 
 def get_salmon_reads_cmd(in_):
@@ -178,7 +199,7 @@ def get_salmon_reads_cmd(in_):
 
 rule salmon_quant:
     input: get_files_str
-    output: protected("rnaseq_quant/salmon/{sample}/quant.sf"),"rnaseq_quant/salmon/{sample}/cmd_info.json", "rnaseq_quant/salmon/{sample}/lib_format_counts.json", "rnaseq_quant/salmon/{sample}/quant.sf.run_log"
+    output: "rnaseq_quant/salmon/{sample}/quant.sf","rnaseq_quant/salmon/{sample}/cmd_info.json", "rnaseq_quant/salmon/{sample}/lib_format_counts.json", "rnaseq_quant/salmon/{sample}/quant.sf.run_log"
     threads: 8
     log: "rnaseq_quant/salmon/{sample}/quant.sf.run_log"
     run:
