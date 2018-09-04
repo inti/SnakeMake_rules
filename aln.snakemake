@@ -93,7 +93,7 @@ rule merge_sample_vcf:
 rule covered_regions:
     input: "aln/{sample}.bam"
     output: "aln/{sample}.bam.coverage.bed"
-    shell: "bedtools genomecov -ibam {input} -bg -split > {output}"
+    shell: "bedtools genomecov -ibam {input} -bg -split | bedtools merge -d 1000 > {output}"
 
 rule split_sample_bed:
     input: "aln/{sample}.bam.coverage.bed"
@@ -108,8 +108,7 @@ rule split_bed:
 rule split_call_vcf_covered_regions:
     input: vcf="vcf/call/freebayes.call.vcf.gz", region = "aln/covered_regions_{region_subset}"
     output: vcf="vcf/call/freebayes.call.region_{region_subset}.vcf.gz"
-    shell: "bcftools view -h {input.vcf} | cut -f 1-11 | bgzip -c /dev/stdin > {output} && bedtools intersect -a {input.region} -b {input.vcf} -wb | cut -f 1-11 | bgzip -c /dev/stdin >> {output} && "
-           "vt sort -m full {output} | bgzip -c /dev/stdin > {output}.tmp && mv -f {output}.tmp {output}"
+    shell: "bcftools view -R {input.region} {input.vcf} | bcftools sort -m 2048 -T ./ -O z -o {output}"
 
 rule vcf_index:
     input: "{file_name}.vcf.gz"
