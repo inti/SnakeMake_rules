@@ -47,18 +47,17 @@ rule read_backed_phasing:
 
 rule freebayes_call_region:
     input: ref=REF, bams = expand("aln/{sample}.bam", sample=SAMPLES), region = "aln/covered_regions_{region_subset}", bais = expand("aln/{sample}.bam.bai", sample=SAMPLES), known_vars = "vcf/call/freebayes.call.region_{region_subset}.vcf.gz", known_vars_tbi = "vcf/call/freebayes.call.region_{region_subset}.vcf.gz.tbi"
-    output: temp("vcf/regions/freebayes.joint.region_{region_subset}.vcf.gz")
-    threads: 1
+    output: temp("vcf/joint/freebayes.joint.region_{region_subset}.vcf.gz")
+    threads: 14
     resources: io_score = 10
     priority: 100
-    shell: "freebayes -@ {input.known_vars} --only-use-input-alleles -t {input.region} -f {input.ref} {input.bams} --min-alternate-count 1 --min-alternate-fraction 0.01 --min-coverage 5 -0 | vt sort -m full /dev/stdin | vt uniq /dev/stdin | vt normalize -r {input.ref} /dev/stdin | bgzip -c /dev/stdin | bcftools filter --SnpGap 10 -i \"QUAL>30\" -O z -o {output} "
+    shell: "freebayes-parallel <(sed \"s/	/:/\" {input.region} |  sed \"s/	/\-/\" ) {threads} -@ {input.known_vars} --only-use-input-alleles -f {input.ref} {input.bams} --min-alternate-count 1 --min-alternate-fraction 0.01 --min-coverage 5 -0 | vt sort -m full /dev/stdin | vt uniq /dev/stdin | vt normalize -r {input.ref} /dev/stdin | bgzip -c /dev/stdin | bcftools filter --SnpGap 10 -i \"QUAL>30\" -O z -o {output} "
 
 rule merge_region_vcf:
-    input: vcf = dynamic("vcf/regions/freebayes.joint.region_{region_subset}.vcf.gz"), vcf_idx = dynamic("vcf/regions/freebayes.joint.region_{region_subset}.vcf.gz.tbi")
-    output: raw = "vcf/freebayes.joint.vcf.gz", snps = "vcf/freebayes.joint.snps.vcf.gz", tmp = temp("vcf/freebayes.joint.TMP.vcf.gz")
-    shell: """vt cat {input.vcf} | bgzip -c /dev/stdin > {output.tmp}
-              tabix -f {output.tmp}
-              vt sort -m chrom {output.tmp} | vt sort -m full /dev/stdin | bgzip -c /dev/stdin > {output.raw}
+    input: vcf = dynamic("vcf/joint/freebayes.joint.region_{region_subset}.vcf.gz"), vcf_idx = dynamic("vcf/joint/freebayes.joint.region_{region_subset}.vcf.gz.tbi")
+    output: raw = "vcf/freebayes.joint.vcf.gz", snps = "vcf/freebayes.joint.snps.vcf.gz"
+    shell: """mkdir -p {output.raw}.TMPDIR && rm -f {output.raw}.TMPDIR/*
+              vt cat {input.vcf} | bcftools sort -T {output.raw}.TMPDIR  -m 4G -o {output.raw} -O z /dev/stdin 
 	      bcftools filter -i 'TYPE=\"snp\"' {output.raw} -O z -o {output.snps}""" 
 
 rule merge_coverage:
@@ -71,22 +70,23 @@ rule merge_coverage:
 rule freebayes_call_region_per_sample:
     input: ref=REF, bams = "aln/{sample}.bam", region = "aln/{sample}.bam.coverage.bed_{sample_subset}", bais = "aln/{sample}.bam.bai"
     output: temp("vcf/call/{sample}.freebayes.call.region_{sample_subset}.vcf.gz")
-    threads: 1
+    threads: 12
     resources: io_score = 10
-    shell: "(freebayes -t {input.region} -f {input.ref} {input.bams} --min-alternate-count 1 --min-alternate-fraction 0.01 --min-coverage 5 -0 | vt sort -m full /dev/stdin | vt uniq /dev/stdin | vt normalize -r {input.ref} /dev/stdin | bgzip -c /dev/stdin) | bcftools filter --SnpGap 10 -i \"QUAL>30\" -O z -o {output} "
+    shell: "freebayes-parallel <(sed \"s/	/:/\" {input.region} |  sed \"s/	/\-/\" ) {threads} -f {input.ref} {input.bams} --min-alternate-count 1 --min-alternate-fraction 0.01 --min-coverage 5 -0 | vt sort -m full /dev/stdin | vt uniq /dev/stdin | vt normalize -r {input.ref} /dev/stdin | bgzip -c /dev/stdin | bcftools filter --SnpGap 10 -i \"QUAL>30\" -O z -o {output} "
+
 
 rule merge_sample_region_vcf:
     input: vcf = expand("vcf/call/{sample}.freebayes.call.region_{sample_subset}.vcf.gz", sample_subset=N_CALL_REGIONS_IDX, sample="{sample}"), vcf_idx = expand("vcf/call/{sample}.freebayes.call.region_{sample_subset}.vcf.gz.tbi", sample_subset=N_CALL_REGIONS_IDX, sample="{sample}")
-    output: raw = "vcf/call/{sample}.freebayes.call.vcf.gz", snps = "vcf/call/{sample}.freebayes.call.snps.vcf.gz", tmp = temp("vcf/call/{sample}.freebayes.call.TMP.vcf.gz")
-    priority: 80
-    shell: """vt cat {input.vcf} | bgzip -c /dev/stdin > {output.tmp}
-              tabix -f {output.tmp}
-              vt sort -m chrom {output.tmp} | vt sort -w 10000 -m local /dev/stdin | bgzip -c /dev/stdin > {output.raw}
+    output: raw = "vcf/call/{sample}.freebayes.call.vcf.gz", snps = "vcf/call/{sample}.freebayes.call.snps.vcf.gz"
+#, tmp = temp("vcf/call/{sample}.freebayes.call.TMP.vcf.gz")
+    priority: 1000
+    shell: """mkdir -p {output.raw}.TMPDIR && rm -f {output.raw}.TMPDIR/*
+              vt cat {input.vcf} |bcftools sort -m 4G -O z -T {output.raw}.TMPDIR -o {output.raw} /dev/stdin 
               bcftools filter -i 'TYPE=\"snp\"' {output.raw} -O z -o {output.snps}"""
 
 rule merge_sample_vcf:
     input: vcf = expand("vcf/call/{sample}.freebayes.call.vcf.gz", sample=SAMPLES), vcf_idx = expand("vcf/call/{sample}.freebayes.call.vcf.gz.tbi", sample=SAMPLES)
-    output: raw = "vcf/call/freebayes.call.vcf.gz", snps = "vcf/call/freebayes.call.snps.vcf.gz"
+    output: raw = "vcf/freebayes.call.vcf.gz", snps = "vcf/call/freebayes.call.snps.vcf.gz"
     shell: """bcftools merge {input.vcf} -O z -o {output.raw}
               bcftools filter -i 'TYPE=\"snp\"' {output.raw} -O z -o {output.snps}"""
 
@@ -106,9 +106,9 @@ rule split_bed:
     shell: "cat {input} | parallel -j1 --pipe -N1000 'cat > aln/covered_regions_{{#}}'"
 
 rule split_call_vcf_covered_regions:
-    input: vcf="vcf/call/freebayes.call.vcf.gz", region = "aln/covered_regions_{region_subset}"
+    input: vcf="vcf/freebayes.call.vcf.gz", tbi="vcf/freebayes.call.vcf.gz.tbi", region = "aln/covered_regions_{region_subset}"
     output: vcf="vcf/call/freebayes.call.region_{region_subset}.vcf.gz"
-    shell: "bcftools view -R {input.region} {input.vcf} | bcftools sort -m 2048 -T ./ -O z -o {output}"
+    shell: "mkdir {output}.TMPDIR && bcftools view -R {input.region} {input.vcf} | bcftools sort -m 4G -T {output}.TMPDIR -O z -o {output}"
 
 rule vcf_index:
     input: "{file_name}.vcf.gz"
@@ -138,15 +138,15 @@ def get_files_str_from_str(samp):
 
 rule gsnap_map:
     input: fastq= get_files_str, ref = REF, gtf = GTF 
-    output: bam =protected("aln/{sample}.bam"), tmp_bam = temp("aln/{sample}.tmp_.bam"), tmp_transIndel = temp("aln/{sample}.transIndel.bam") 
+    output: bam =protected("aln/{sample}.bam") 
     threads: 10
     log: "aln/{sample}.log"
     shell:
         "gsnap -t {threads} --gunzip -N 0 -s ~/anaconda2/envs/ngs/share/b_terrestris/b_terrestris.maps/b_terrestris.splicesites.iit -D ~/anaconda2/envs/ngs/share/ -d b_terrestris --read-group-id={wildcards.sample} --read-group-name={wildcards.sample} --format=sam {input.fastq} 2> {log} | "
-	"samtools view -@ {threads} -q 30 -S -O BAM /dev/stdin 2> {log} |"
-	"samtools sort -@ {threads} -O BAM -T aln/{wildcards.sample} /dev/stdin 2> {log} | "
-        "~/anaconda2/envs/ngs/bin/python ~/app/transIndel/transIndel_build_RNA.py -i /dev/stdin -r {input.ref} -g {input.gtf} -o {output.tmp_transIndel} 2>{log} && "
-	"cp -fv {output.tmp_transIndel} {output.bam} &> {log}"
+	"samtools view -@ {threads} -q 30 -S -O BAM /dev/stdin 2>> {log} |"
+	"samtools sort -@ {threads} -O BAM -T aln/{wildcards.sample} /dev/stdin 2>> {log} | "
+        "~/anaconda2/envs/ngs/bin/python ~/app/transIndel/transIndel_build_RNA.py -i /dev/stdin -r {input.ref} -g {input.gtf} -o aln/{wildcards.sample}.transIndel.bam 2>>{log} && "
+	"cp -fv aln/{wildcards.sample}.transIndel.bam {output.bam} &>> {log}"
 
 rule gsnap_remap:
     input: fastq= get_files_str, snp_iit = "gmap_db/b_terrestris/b_terrestris.maps/snp.iit"
@@ -234,11 +234,36 @@ def bam_is_pe(wildcards):
         return 0
 
 rule phaser:
-    input: vcf = "vcf/freebayes.joint.vcf.gz", bam = "aln/{sample}.bam"
-    output: expand("phaser/{sample}/{sample}.{ext}", ext=["allele_config.txt","haplotypes.txt","variant_connections.txt","allelic_counts.txt","haplotypic_counts.txt","vcf.gz"], sample="{sample}")
+    input: vcf = "vcf/freebayes.joint.vcf.gz", bam = "aln/{sample}.bam", tbi = "vcf/freebayes.joint.vcf.gz.tbi", bai = "aln/{sample}.bam.bai"
+    output: dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.allele_config.txt"), 
+            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.haplotypes.txt"), 
+            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.variant_connections.txt"), 
+            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.allelic_counts.txt"), 
+            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.haplotypic_counts.txt"),
+            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.vcf.gz")
     params: is_pe= bam_is_pe
+    threads: 14
     log: "phaser/{sample}/{sample}.phaser.log"
-    shell: "~/anaconda2/envs/ngs/bin/python ~/app/phaser/phaser/phaser.py --vcf {input.vcf} --bam {input.bam} --paired_end {params.is_pe} --mapq 30 --baseq 10 --sample {wildcards.sample} --o phaser/{wildcards.sample}/{wildcards.sample} &> {log}"
+    shell: """mkdir -p phaser/{wildcards.sample}/byChrom #&& rm -f phaser/{wildcards.sample}/byChrom/* 
+           parallel -j {threads} -a aln/chrom_ids.txt ~/anaconda2/envs/ngs/bin/python ~/app/phaser/phaser/phaser.py --vcf {input.vcf} --bam {input.bam} --paired_end {params.is_pe} --mapq 30 --baseq 10 --sample {wildcards.sample} --o phaser/{wildcards.sample}/byChrom/{{1}} --chr {{1}} &> {log}
+           """
+
+rule merge_phaser:
+    input: dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.allele_config.txt"),
+            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.haplotypes.txt"),
+            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.variant_connections.txt"),
+            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.allelic_counts.txt"),
+            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.haplotypic_counts.txt"),
+            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.vcf.gz")
+    output: expand("phaser/{sample}/{sample}.{ext}", ext=["allele_config.txt","haplotypes.txt","variant_connections.txt","allelic_counts.txt","haplotypic_counts.txt","vcf.gz"], sample="{sample}")
+    threads: 1
+    shell:"""for ext in allele_config.txt allelic_counts.txt haplotypes.txt haplotypic_counts.txt variant_connections.txt;
+           do
+	       ~/anaconda2/envs/ngs/bin/python -c 'import pandas as pd; import sys; frame = pd.concat([  pd.read_table(file_,index_col=None, header=0) for file_ in sys.argv[2:] ]); frame.to_csv(sys.argv[1],index=False,sep="\t")' phaser/{wildcards.sample}/{wildcards.sample}.$ext phaser/{wildcards.sample}/byChrom/*$ext
+	   done;
+           mkdir -p  phaser/{wildcards.sample}/{wildcards.sample}.TMPDIR && rm -f phaser/{wildcards.sample}/{wildcards.sample}.TMPDIR/*
+	   vt cat phaser/{wildcards.sample}/byChrom/*.vcf.gz | bcftools sort -m 4G -O z -T phaser/{wildcards.sample}/{wildcards.sample}.TMPDIR -o phaser/{wildcards.sample}/{wildcards.sample}.vcf.gz /dev/stdin
+           """
 
 rule phaser_gene_ase:
     input: hap_counts = "phaser/{sample}/{sample}.haplotypic_counts.txt", features = expand("/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.39.{feat_type}.bed", feat_type=["transcript","gene"])
