@@ -26,6 +26,7 @@ def get_sample_ids():
 
 SAMPLES = get_sample_ids()
 N_CALL_REGIONS_IDX=range(1,25)
+CHROMS=get_chroms()
 
 rule all: #bai=expand("aln/{sample}.bam.bai", sample=get_se_files()), bai_pe=expand("aln/{pe_sample}.bam.bai", sample=get_pe_files()),\
     input: bai = expand("aln/{sample}.bam.bai", sample=SAMPLES),\
@@ -235,35 +236,42 @@ def bam_is_pe(wildcards):
 
 rule phaser:
     input: vcf = "vcf/freebayes.joint.vcf.gz", bam = "aln/{sample}.bam", tbi = "vcf/freebayes.joint.vcf.gz.tbi", bai = "aln/{sample}.bam.bai"
-    output: dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.allele_config.txt"), 
-            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.haplotypes.txt"), 
-            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.variant_connections.txt"), 
-            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.allelic_counts.txt"), 
-            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.haplotypic_counts.txt"),
-            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.vcf.gz")
+    output: expand("phaser/{sample}/{sample}.{ext}", ext=["allele_config.txt","haplotypes.txt","variant_connections.txt","allelic_counts.txt","haplotypic_counts.txt","vcf.gz"], sample="{sample}")
+            #dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.allele_config.txt"), 
+            #dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.haplotypes.txt"), 
+            #dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.variant_connections.txt"), 
+            #dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.allelic_counts.txt"), 
+            #dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.haplotypic_counts.txt"),
+            #dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.vcf.gz")
     params: is_pe= bam_is_pe
     threads: 14
     log: "phaser/{sample}/{sample}.phaser.log"
-    shell: """mkdir -p phaser/{wildcards.sample}/byChrom #&& rm -f phaser/{wildcards.sample}/byChrom/* 
-           parallel -j {threads} -a aln/chrom_ids.txt ~/anaconda2/envs/ngs/bin/python ~/app/phaser/phaser/phaser.py --vcf {input.vcf} --bam {input.bam} --paired_end {params.is_pe} --mapq 30 --baseq 10 --sample {wildcards.sample} --o phaser/{wildcards.sample}/byChrom/{{1}} --chr {{1}} &> {log}
+    shell: """#mkdir -p phaser/{wildcards.sample}/byChrom #&& rm -f phaser/{wildcards.sample}/byChrom/* 
+           #parallel -j {threads} -a aln/chrom_ids.txt ~/anaconda2/envs/ngs/bin/python ~/app/phaser/phaser/phaser.py --vcf {input.vcf} --bam {input.bam} --paired_end {params.is_pe} --mapq 30 --baseq 10 --sample {wildcards.sample} --o phaser/{wildcards.sample}/byChrom/{{1}} --chr {{1}} &> {log}
+for ext in allele_config.txt allelic_counts.txt haplotypes.txt haplotypic_counts.txt variant_connections.txt;
+           do
+               ~/anaconda2/envs/ngs/bin/python -c 'import pandas as pd; import sys; frame = pd.concat([  pd.read_table(file_,index_col=None, header=0) for file_ in sys.argv[2:] ]); frame.to_csv(sys.argv[1],index=False,sep="\t")' phaser/{wildcards.sample}/{wildcards.sample}.$ext phaser/{wildcards.sample}/byChrom/*$ext
+           done;
+           mkdir -p  phaser/{wildcards.sample}/{wildcards.sample}.TMPDIR && rm -f phaser/{wildcards.sample}/{wildcards.sample}.TMPDIR/*
+           vt cat phaser/{wildcards.sample}/byChrom/*.vcf.gz | bcftools sort -m 4G -O z -T phaser/{wildcards.sample}/{wildcards.sample}.TMPDIR -o phaser/{wildcards.sample}/{wildcards.sample}.vcf.gz /dev/stdin &> /dev/null
            """
 
-rule merge_phaser:
-    input: dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.allele_config.txt"),
-            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.haplotypes.txt"),
-            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.variant_connections.txt"),
-            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.allelic_counts.txt"),
-            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.haplotypic_counts.txt"),
-            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.vcf.gz")
-    output: expand("phaser/{sample}/{sample}.{ext}", ext=["allele_config.txt","haplotypes.txt","variant_connections.txt","allelic_counts.txt","haplotypic_counts.txt","vcf.gz"], sample="{sample}")
-    threads: 1
-    shell:"""for ext in allele_config.txt allelic_counts.txt haplotypes.txt haplotypic_counts.txt variant_connections.txt;
-           do
-	       ~/anaconda2/envs/ngs/bin/python -c 'import pandas as pd; import sys; frame = pd.concat([  pd.read_table(file_,index_col=None, header=0) for file_ in sys.argv[2:] ]); frame.to_csv(sys.argv[1],index=False,sep="\t")' phaser/{wildcards.sample}/{wildcards.sample}.$ext phaser/{wildcards.sample}/byChrom/*$ext
-	   done;
-           mkdir -p  phaser/{wildcards.sample}/{wildcards.sample}.TMPDIR && rm -f phaser/{wildcards.sample}/{wildcards.sample}.TMPDIR/*
-	   vt cat phaser/{wildcards.sample}/byChrom/*.vcf.gz | bcftools sort -m 4G -O z -T phaser/{wildcards.sample}/{wildcards.sample}.TMPDIR -o phaser/{wildcards.sample}/{wildcards.sample}.vcf.gz /dev/stdin
-           """
+#rule merge_phaser:
+#    input: dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.allele_config.txt"),
+#            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.haplotypes.txt"),
+#            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.variant_connections.txt"),
+#            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.allelic_counts.txt"),
+#            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.haplotypic_counts.txt"),
+#            dynamic("phaser/{sample}/byChrom/{prefix_chrom_ids}.vcf.gz")
+#    output: expand("phaser/{sample}/{sample}.{ext}", ext=["allele_config.txt","haplotypes.txt","variant_connections.txt","allelic_counts.txt","haplotypic_counts.txt","vcf.gz"], sample="{sample}")
+#    threads: 1
+#    shell:"""for ext in allele_config.txt allelic_counts.txt haplotypes.txt haplotypic_counts.txt variant_connections.txt;
+#           do
+#	       ~/anaconda2/envs/ngs/bin/python -c 'import pandas as pd; import sys; frame = pd.concat([  pd.read_table(file_,index_col=None, header=0) for file_ in sys.argv[2:] ]); frame.to_csv(sys.argv[1],index=False,sep="\t")' phaser/{wildcards.sample}/{wildcards.sample}.$ext phaser/{wildcards.sample}/byChrom/*$ext
+#	   done;
+#           mkdir -p  phaser/{wildcards.sample}/{wildcards.sample}.TMPDIR && rm -f phaser/{wildcards.sample}/{wildcards.sample}.TMPDIR/*
+#	   vt cat phaser/{wildcards.sample}/byChrom/*.vcf.gz | bcftools sort -m 4G -O z -T phaser/{wildcards.sample}/{wildcards.sample}.TMPDIR -o phaser/{wildcards.sample}/{wildcards.sample}.vcf.gz /dev/stdin &> /dev/null
+#           """
 
 rule phaser_gene_ase:
     input: hap_counts = "phaser/{sample}/{sample}.haplotypic_counts.txt", features = expand("/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.39.{feat_type}.bed", feat_type=["transcript","gene"])
