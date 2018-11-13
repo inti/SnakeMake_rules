@@ -149,7 +149,7 @@ def get_files_str_from_str(samp):
 
 rule gsnap_map:
     input: fastq= get_files_str, ref = REF, gtf = GTF, iit_splice = IIT_SPLICESITES, gsnap_db_folder = GSNAP_DB_FOLDER
-    output: bam =protected("aln/{sample}.bam"), transIndel = temp("aln/{sample}.transIndel.bam") 
+    output: bam =protected("aln/{sample}.bam") #, transIndel = temp("aln/{sample}.transIndel.bam") 
     threads: 10
     priority: 500
     log: "aln/{sample}.log"
@@ -159,8 +159,8 @@ rule gsnap_map:
         "gsnap -t {threads} --gunzip -N 0 -s {input.iit_splice} -D {input.gsnap_db_folder} -d {params.gsnap_db} --read-group-id={wildcards.sample} --read-group-name={wildcards.sample} --format=sam {input.fastq} 2> {log} | "
 	"samtools view -@ {threads} -q 30 -S -O BAM /dev/stdin 2>> {log} |"
 	"samtools sort -@ {threads} -O BAM -T {output.bam}.TMPDIR /dev/stdin 2>> {log} | "
-        "~/anaconda2/envs/ngs/bin/python ~/app/transIndel/transIndel_build_RNA.py -i /dev/stdin -r {input.ref} -g {input.gtf} -o aln/{wildcards.sample}.transIndel.bam 2>>{log} && "
-	"cp -fv aln/{wildcards.sample}.transIndel.bam {output.bam} &>> {log}"
+        "~/anaconda2/envs/ngs/bin/python ~/app/transIndel/transIndel_build_RNA.py -i /dev/stdin -r {input.ref} -g {input.gtf} -o aln/{wildcards.sample}.bam 2>>{log} && "
+	#"cp -fv aln/{wildcards.sample}.transIndel.bam {output.bam} &>> {log}"
 
 rule gsnap_remap:
     input: fastq= get_files_str, snp_iit = "gmap_db/b_terrestris/b_terrestris.maps/snp.iit"
