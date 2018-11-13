@@ -2,8 +2,12 @@ import pandas as pd
 import os
 from os.path import isfile, islink
 
-REF="/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa"
-GTF="/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.39.gtf"
+REF=config["GENOME"]["REF"] #"/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa"
+GTF=config["GENOME"]["GTF"] #"/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.39.gtf"
+IIT_SPLICESITES=config["GENOME"]["IIT_SPLICESITES"]
+GSNAP_DB_FOLDER=config["GENOME"]["GSNAP_DB_FOLDER"]
+GSNAP_DB_NAME=config["GENOME"]["GSNAP_DB_NAME"]
+
 #SAMPLES = pd.read_csv("SRR_Acc_list.txt", names=['acc'], squeeze=True).values
 
 
@@ -34,6 +38,12 @@ rule all: #bai=expand("aln/{sample}.bam.bai", sample=get_se_files()), bai_pe=exp
 	#rnaseq_quant = "rnaseq_quant/salmon_gene_counts_lengthScaledTPM.txt",\
         phaser_ase = expand("phaser/{sample}/{sample}.phaser_ase.{feat_type}.txt", feat_type=["transcript","gene"], sample=SAMPLES)
 
+rule all_bam:
+    input: bai = expand("aln/{sample}.bam.bai", sample=SAMPLES), bam = expand("aln/{sample}.bam", sample=SAMPLES)
+
+rule all_bam_coverage:
+    input: coverage = "aln/covered_regions.bed"
+
 rule beagle_phasing:
     input: "vcf/freebayes.joint.snps.rbp.vcf.gz"
     output: "vcf/freebayes.joint.snps.rbp.imputed.vcf.gz"
@@ -51,7 +61,7 @@ rule freebayes_call_region:
     output: temp("vcf/joint/freebayes.joint.region_{region_subset}.vcf.gz")
     threads: 14
     resources: io_score = 10
-    priority: 100
+    priority: 1500
     shell: "freebayes-parallel <(sed \"s/	/:/\" {input.region} |  sed \"s/	/\-/\" ) {threads} -@ {input.known_vars} --only-use-input-alleles -f {input.ref} {input.bams} --min-alternate-count 1 --min-alternate-fraction 0.01 --min-coverage 5 -0 | vt sort -m full /dev/stdin | vt uniq /dev/stdin | vt normalize -r {input.ref} /dev/stdin | bgzip -c /dev/stdin | bcftools filter --SnpGap 10 -i \"QUAL>30\" -O z -o {output} "
 
 rule merge_region_vcf:
@@ -138,14 +148,17 @@ def get_files_str_from_str(samp):
         return file_str_1
 
 rule gsnap_map:
-    input: fastq= get_files_str, ref = REF, gtf = GTF 
-    output: bam =protected("aln/{sample}.bam") 
+    input: fastq= get_files_str, ref = REF, gtf = GTF, iit_splice = IIT_SPLICESITES, gsnap_db_folder = GSNAP_DB_FOLDER
+    output: bam =protected("aln/{sample}.bam"), transIndel = temp("aln/{sample}.transIndel.bam") 
     threads: 10
+    priority: 500
     log: "aln/{sample}.log"
+    params: gsnap_db = GSNAP_DB_NAME
     shell:
-        "gsnap -t {threads} --gunzip -N 0 -s ~/anaconda2/envs/ngs/share/b_terrestris/b_terrestris.maps/b_terrestris.splicesites.iit -D ~/anaconda2/envs/ngs/share/ -d b_terrestris --read-group-id={wildcards.sample} --read-group-name={wildcards.sample} --format=sam {input.fastq} 2> {log} | "
+        "mkdir -p {output.bam}.TMPDIR && rm -f {output.bam}.TMPDIR/* &&"
+        "gsnap -t {threads} --gunzip -N 0 -s {input.iit_splice} -D {input.gsnap_db_folder} -d {params.gsnap_db} --read-group-id={wildcards.sample} --read-group-name={wildcards.sample} --format=sam {input.fastq} 2> {log} | "
 	"samtools view -@ {threads} -q 30 -S -O BAM /dev/stdin 2>> {log} |"
-	"samtools sort -@ {threads} -O BAM -T aln/{wildcards.sample} /dev/stdin 2>> {log} | "
+	"samtools sort -@ {threads} -O BAM -T {output.bam}.TMPDIR /dev/stdin 2>> {log} | "
         "~/anaconda2/envs/ngs/bin/python ~/app/transIndel/transIndel_build_RNA.py -i /dev/stdin -r {input.ref} -g {input.gtf} -o aln/{wildcards.sample}.transIndel.bam 2>>{log} && "
 	"cp -fv aln/{wildcards.sample}.transIndel.bam {output.bam} &>> {log}"
 
@@ -240,8 +253,8 @@ rule phaser:
     params: is_pe= bam_is_pe
     threads: 14
     log: "phaser/{sample}/{sample}.phaser.log"
-    shell: """#mkdir -p phaser/{wildcards.sample}/byChrom #&& rm -f phaser/{wildcards.sample}/byChrom/* 
-           #parallel -j {threads} -a aln/chrom_ids.txt ~/anaconda2/envs/ngs/bin/python ~/app/phaser/phaser/phaser.py --vcf {input.vcf} --bam {input.bam} --paired_end {params.is_pe} --mapq 30 --baseq 10 --sample {wildcards.sample} --o phaser/{wildcards.sample}/byChrom/{{1}} --chr {{1}} &> {log}
+    shell: """mkdir -p phaser/{wildcards.sample}/byChrom && rm -f phaser/{wildcards.sample}/byChrom/* 
+           parallel -j {threads} -a aln/chrom_ids.txt ~/anaconda2/envs/ngs/bin/python ~/app/phaser/phaser/phaser.py --vcf {input.vcf} --bam {input.bam} --paired_end {params.is_pe} --mapq 30 --baseq 10 --sample {wildcards.sample} --o phaser/{wildcards.sample}/byChrom/{{1}} --chr {{1}} &> {log}
 for ext in allele_config.txt allelic_counts.txt haplotypes.txt haplotypic_counts.txt variant_connections.txt;
            do
                ~/anaconda2/envs/ngs/bin/python -c 'import pandas as pd; import sys; frame = pd.concat([  pd.read_table(file_,index_col=None, header=0) for file_ in sys.argv[2:] ]); frame.to_csv(sys.argv[1],index=False,sep="\t")' phaser/{wildcards.sample}/{wildcards.sample}.$ext phaser/{wildcards.sample}/byChrom/*$ext
