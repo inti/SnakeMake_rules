@@ -1,0 +1,154 @@
+import pandas as pd
+import os
+from os.path import isfile, islink
+
+REF=config["GENOME"]["REF"] #"/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa"
+GTF=config["GENOME"]["GTF"] #"/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.39.gtf"
+IIT_SPLICESITES=config["GENOME"]["IIT_SPLICESITES"]
+GSNAP_DB_FOLDER=config["GENOME"]["GSNAP_DB_FOLDER"]
+GSNAP_DB_NAME=config["GENOME"]["GSNAP_DB_NAME"]
+
+#SAMPLES = pd.read_csv("SRR_Acc_list.txt", names=['acc'], squeeze=True).values
+
+
+include: "ase.snakemake"
+
+#ruleorder: gsnap_map_pe > gsnap_map_se
+#ruleorder: salmon_quant_pe > salmon_quant_se
+#ruleorder: freebayes_call_parallel > merge_chr_vcf > freebayes_call_chrom 
+
+localrules: all, vcf_index#, split_sample_bed, split_bed
+
+def get_chroms():
+    chroms = pd.read_table("/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa.fai",names=["CHROM","var1","var2","var3","var4"]).loc[:,"CHROM"].tolist()
+    return chroms
+
+def get_sample_ids():
+    files = os.listdir("fastq/")
+    _ids = pd.unique([ f.replace(".fastq.gz","").replace("_1","").replace("_2","") for f in files])
+    return _ids
+
+SAMPLES = get_sample_ids()
+N_CALL_REGIONS_IDX=range(1,25)
+CHROMS=get_chroms()
+
+rule freebayes_call_region:
+    input: ref=REF, bams = expand("aln/{sample}.bam", sample=SAMPLES), region = "aln/covered_regions_{region_subset}", bais = expand("aln/{sample}.bam.bai", sample=SAMPLES), known_vars = "vcf/call/freebayes.call.region_{region_subset}.vcf.gz", known_vars_tbi = "vcf/call/freebayes.call.region_{region_subset}.vcf.gz.tbi"
+    output: temp("vcf/joint/freebayes.joint.region_{region_subset}.vcf.gz")
+    threads: 14
+    resources: io_score = 10
+    priority: 1500
+    shell: "freebayes-parallel <(sed \"s/	/:/\" {input.region} |  sed \"s/	/\-/\" ) {threads} -@ {input.known_vars} --only-use-input-alleles -f {input.ref} {input.bams} --min-alternate-count 1 --min-alternate-fraction 0.01 --min-coverage 5 -0 | vt sort -m full /dev/stdin | vt uniq /dev/stdin | vt normalize -r {input.ref} /dev/stdin | bgzip -c /dev/stdin | bcftools filter --SnpGap 10 -i \"QUAL>30\" -O z -o {output} "
+
+rule merge_region_vcf:
+    input: vcf = dynamic("vcf/joint/freebayes.joint.region_{region_subset}.vcf.gz"), vcf_idx = dynamic("vcf/joint/freebayes.joint.region_{region_subset}.vcf.gz.tbi")
+    output: raw = "vcf/freebayes.joint.vcf.gz", snps = "vcf/freebayes.joint.snps.vcf.gz"
+    shell: """mkdir -p {output.raw}.TMPDIR && rm -f {output.raw}.TMPDIR/*
+              vt cat {input.vcf} | bcftools sort -T {output.raw}.TMPDIR  -m 4G -o {output.raw} -O z /dev/stdin 
+	      bcftools filter -i 'TYPE=\"snp\"' {output.raw} -O z -o {output.snps}""" 
+
+rule merge_coverage:
+    input: expand("aln/{sample}.bam.coverage.bed", sample=SAMPLES)
+    output: bed_out = "aln/covered_regions.bed", chrom_ids = temp("aln/chrom_ids.txt")
+    threads: 24
+    shell: """cut -f 1 /home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa.fai > {output.chrom_ids} 
+	parallel -k -j {threads} -a aln/chrom_ids.txt \"grep -hw {{1}} {input} | sort -k1,1 -k2,2n | bedtools merge -d 1000\" 2>aln/covered_regions.log > {output.bed_out}"""
+
+rule freebayes_call_region_per_sample:
+    input: ref=REF, bams = "aln/{sample}.bam", region = "aln/{sample}.bam.coverage.bed_{sample_subset}", bais = "aln/{sample}.bam.bai"
+    output: temp("vcf/call/{sample}.freebayes.call.region_{sample_subset}.vcf.gz")
+    threads: 12
+    resources: io_score = 10
+    shell: "freebayes-parallel <(sed \"s/	/:/\" {input.region} |  sed \"s/	/\-/\" ) {threads} -f {input.ref} {input.bams} --min-alternate-count 1 --min-alternate-fraction 0.01 --min-coverage 5 -0 | vt sort -m full /dev/stdin | vt uniq /dev/stdin | vt normalize -r {input.ref} /dev/stdin | bgzip -c /dev/stdin | bcftools filter --SnpGap 10 -i \"QUAL>30\" -O z -o {output} "
+
+
+rule merge_sample_region_vcf:
+    input: vcf = expand("vcf/call/{sample}.freebayes.call.region_{sample_subset}.vcf.gz", sample_subset=N_CALL_REGIONS_IDX, sample="{sample}"), vcf_idx = expand("vcf/call/{sample}.freebayes.call.region_{sample_subset}.vcf.gz.tbi", sample_subset=N_CALL_REGIONS_IDX, sample="{sample}")
+    output: raw = "vcf/call/{sample}.freebayes.call.vcf.gz", snps = "vcf/call/{sample}.freebayes.call.snps.vcf.gz"
+#, tmp = temp("vcf/call/{sample}.freebayes.call.TMP.vcf.gz")
+    priority: 1000
+    shell: """mkdir -p {output.raw}.TMPDIR && rm -f {output.raw}.TMPDIR/*
+              vt cat {input.vcf} |bcftools sort -m 4G -O z -T {output.raw}.TMPDIR -o {output.raw} /dev/stdin 
+              bcftools filter -i 'TYPE=\"snp\"' {output.raw} -O z -o {output.snps}"""
+
+rule merge_sample_vcf:
+    input: vcf = expand("vcf/call/{sample}.freebayes.call.vcf.gz", sample=SAMPLES), vcf_idx = expand("vcf/call/{sample}.freebayes.call.vcf.gz.tbi", sample=SAMPLES)
+    output: raw = "vcf/freebayes.call.vcf.gz", snps = "vcf/call/freebayes.call.snps.vcf.gz"
+    shell: """bcftools merge {input.vcf} -O z -o {output.raw}
+              bcftools filter -i 'TYPE=\"snp\"' {output.raw} -O z -o {output.snps}"""
+
+rule covered_regions:
+    input: "aln/{sample}.bam"
+    output: "aln/{sample}.bam.coverage.bed"
+    shell: "bedtools genomecov -ibam {input} -bg -split | bedtools merge -d 1000 > {output}"
+
+rule split_sample_bed:
+    input: "aln/{sample}.bam.coverage.bed"
+    output: expand( temp("aln/{sample}.bam.coverage.bed_{sample_subset}"), sample_subset=N_CALL_REGIONS_IDX , sample="{sample}")
+    shell: "NUMOFLINES=$(wc -l < \"{input}\") && N_4_SPLIT=$(($(( $NUMOFLINES / 25 )) + 1)) && cat {input} | parallel -j1 --pipe -N$N_4_SPLIT 'cat > aln/{wildcards.sample}.bam.coverage.bed_{{#}}' &> /dev/null"
+
+rule split_bed:
+    input: "aln/covered_regions.bed"
+    output: dynamic("aln/covered_regions_{region_subset}")
+    shell: "cat {input} | parallel -j1 --pipe -N1000 'cat > aln/covered_regions_{{#}}'"
+
+rule split_call_vcf_covered_regions:
+    input: vcf="vcf/freebayes.call.vcf.gz", tbi="vcf/freebayes.call.vcf.gz.tbi", region = "aln/covered_regions_{region_subset}"
+    output: vcf="vcf/call/freebayes.call.region_{region_subset}.vcf.gz"
+    shell: "mkdir {output}.TMPDIR && bcftools view -R {input.region} {input.vcf} | bcftools sort -m 4G -T {output}.TMPDIR -O z -o {output}"
+
+rule vcf_index:
+    input: "{file_name}.vcf.gz"
+    output: "{file_name}.vcf.gz.tbi"
+    shell: "tabix -f {input}"
+
+rule samtools_index:
+    input:
+        "aln/{sample}.bam"
+    output:
+        "aln/{sample}.bam.bai"
+    threads: 2
+    shell:
+        "samtools index -b -@ {threads} {input}"
+
+def get_files_str(wildcards):
+    samp = wildcards.sample
+    return get_files_str_from_str(samp)
+
+def get_files_str_from_str(samp):
+    file_str_1 = ''.join(("fastq/",samp,"_1.fastq.gz"))
+    file_str_2 = ''.join(("fastq/",samp,"_2.fastq.gz"))
+    if (isfile(file_str_2) or islink(file_str_2)) and (isfile(file_str_2) or islink(file_str_2)):
+        return [file_str_1 , file_str_2]
+    elif isfile(file_str_1) or islink(file_str_1):
+        return file_str_1
+
+rule gsnap_remap:
+    input: fastq= get_files_str, snp_iit = "gmap_db/b_terrestris/b_terrestris.maps/snp.iit"
+    output: protected("aln_remap/{sample}.bam")
+    threads: 10
+    log: "aln_remap/{sample}.log"
+    shell:
+        "gsnap -t {threads} --gunzip -N 0 -s -v {input.snp_iit} -D gmap_db/ -d b_terrestris --read-group-id={wildcards.sample} --read-group-name={wildcards.sample} --format=sam {input.fastq} 2> {log} | "
+        "samtools view -@ {threads} -q 30 -S -O BAM /dev/stdin 2> {log} |"
+        "samtools sort -@ {threads} -O BAM -T aln/{wildcards.sample} /dev/stdin 2> {log} > {output}"
+
+rule bcftools_call:
+    input:
+        fa=REF,
+        bam=expand("aln/{sample}.bam", sample=SAMPLES),
+        bai=expand("aln/{sample}.bam.bai", sample=SAMPLES)
+    output:
+        "calls/all.vcf"
+    shell:
+        "samtools mpileup -g -f {input.fa} {input.bam} | "
+        "bcftools call -mv - > {output}"
+
+rule gmap_db_snp_iit:
+    input: "vcf/freebayes.joint.rbp.imputed.vcf.gz"
+    output: snp_iit = "gmap_db/b_terrestris/b_terrestris.maps/snp.iit", temp_iit = temp("gmap_db/tmp_snp.iit")
+    log: "gmap_db/snp.iit.log"
+    shell: "ln -fs /home/ipedroso/anaconda2/envs/ngs/share/b_terrestris gmap_db && "
+           "gunzip -c {input} | vcf_iit | iit_store -o {output.temp_iit} &> {log} && "
+           "snpindex -D ./gmap_db -d b_terrestris -v snp {output.temp_iit} -V ./gmap_db/b_terrestris/b_terrestris.maps &> {log}"
+

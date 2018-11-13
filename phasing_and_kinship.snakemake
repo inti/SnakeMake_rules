@@ -1,0 +1,47 @@
+import pandas as pd
+import os
+from os.path import isfile, islink
+
+REF=config["GENOME"]["REF"] #"/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa"
+GTF=config["GENOME"]["GTF"] #"/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.39.gtf"
+IIT_SPLICESITES=config["GENOME"]["IIT_SPLICESITES"]
+GSNAP_DB_FOLDER=config["GENOME"]["GSNAP_DB_FOLDER"]
+GSNAP_DB_NAME=config["GENOME"]["GSNAP_DB_NAME"]
+
+
+localrules: all, vcf_index#, split_sample_bed, split_bed
+
+def get_chroms():
+    chroms = pd.read_table("/home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa.fai",names=["CHROM","var1","var2","var3","var4"]).loc[:,"CHROM"].tolist()
+    return chroms
+
+def get_sample_ids():
+    files = os.listdir("fastq/")
+    _ids = pd.unique([ f.replace(".fastq.gz","").replace("_1","").replace("_2","") for f in files])
+    return _ids
+
+SAMPLES = get_sample_ids()
+N_CALL_REGIONS_IDX=range(1,25)
+CHROMS=get_chroms()
+
+rule beagle_phasing:
+    input: "vcf/freebayes.joint.snps.rbp.vcf.gz"
+    output: "vcf/freebayes.joint.snps.rbp.imputed.vcf.gz"
+    params: prefix="vcf/freebayes.joint.snps.rbp.imputed"
+    shell: "java -jar ~/app/beagle.r1399.jar gtgl={input} out={params.prefix} usephase=true"
+
+rule read_backed_phasing:
+    input: joint_vcf = "vcf/freebayes.joint.snps.vcf.gz", bams = expand("aln/{sample}.bam", sample=SAMPLES)
+    output: "vcf/freebayes.joint.snps.rbp.vcf.gz"
+    params: log= "vcf/freebayes.joint.snps.rbp.log"
+    shell: "~/anaconda2/envs/whatshap/bin/whatshap phase --max-coverage 20 -o >( sed \"s/\.:\.:\.:\.:\.:\.:\.:\./.\/.:.:.:.:.:.:.:./g\" /dev/stdin | bgzip -c /dev/stdin > {output}) {input.joint_vcf} {input.bams} &>{params.log}"
+
+
+# Kinship matrix
+
+rule seekin_hom_kinship:
+    input: "vcf/freebayes.joint.rbp.imputed.vcf.gz"
+    output: "test3.kin" #"kinship/freebayes.joint.rbp.imputed.kin" #expand("kinship/freebayes.joint.rbp.imputed.{ext}", ext=["inbreed","kin","matrix","matrixID"])
+    threads: 8
+    log: "kinship/freebayes.joint.rbp.imputed.seekin_hom.log"
+    shell: "seekin kinship -i {input} -d DS -p hom -t {threads} -o test3" #kinship/freebayes.joint.rbp.imputed && ls -lh test3.*"
