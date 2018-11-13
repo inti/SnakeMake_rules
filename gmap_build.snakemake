@@ -1,0 +1,17 @@
+
+configfile: "config.yaml"
+
+rule all:
+    input: config["GENOME"]["IIT_SPLICESITES"], ''.join((config["GENOME"]["GSNAP_DB_FOLDER"],config["GENOME"]["GSNAP_DB_NAME"],"/",config["GENOME"]["GSNAP_DB_NAME"],".chromosome")) 
+
+rule gmap_build: 
+    input: config["GENOME"]["REF"]
+    output: ''.join((config["GENOME"]["GSNAP_DB_FOLDER"],config["GENOME"]["GSNAP_DB_NAME"],"/",config["GENOME"]["GSNAP_DB_NAME"],".chromosome"))
+    params: gsnap_db_name = config["GENOME"]["GSNAP_DB_NAME"]
+    shell: "gmap_build -d {params.gsnap_db_name} -g {input}"
+
+
+rule iit_splicesites:
+    input: config["GENOME"]["GTF"]
+    output: config["GENOME"]["IIT_SPLICESITES"]
+    shell: "cat {input} | gtf_splicesites > {input}.splicesites && cat {input}.splicesites | iit_store -o {input}.splicesites && cp {input}.splicesites {output}"
