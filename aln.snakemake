@@ -72,11 +72,11 @@ rule merge_region_vcf:
 	      bcftools filter -i 'TYPE=\"snp\"' {output.raw} -O z -o {output.snps}""" 
 
 rule merge_coverage:
-    input: expand("aln/{sample}.bam.coverage.bed", sample=SAMPLES)
+    input: bed_files = expand("aln/{sample}.bam.coverage.bed", sample=SAMPLES), ref = REF
     output: bed_out = "aln/covered_regions.bed", chrom_ids = temp("aln/chrom_ids.txt")
     threads: 24
-    shell: """cut -f 1 /home/ipedroso/DATA/ref_genomes/B_terrestris/Bombus_terrestris.Bter_1.0.dna.toplevel.fa.fai > {output.chrom_ids} 
-	parallel -k -j {threads} -a aln/chrom_ids.txt \"grep -hw {{1}} {input} | sort -k1,1 -k2,2n | bedtools merge -d 1000\" 2>aln/covered_regions.log > {output.bed_out}"""
+    shell: """cut -f 1 {input.ref}.fai > {output.chrom_ids} 
+	parallel -k -j {threads} -a aln/chrom_ids.txt \"grep -hw {{1}} {input.bed_files} | sort -k1,1 -k2,2n | bedtools merge -d 1000\" 2>aln/covered_regions.log > {output.bed_out}"""
 
 rule freebayes_call_region_per_sample:
     input: ref=REF, bams = "aln/{sample}.bam", region = "aln/{sample}.bam.coverage.bed_{sample_subset}", bais = "aln/{sample}.bam.bai"
@@ -149,7 +149,7 @@ def get_files_str_from_str(samp):
 
 rule gsnap_map:
     input: fastq= get_files_str, ref = REF, gtf = GTF, iit_splice = IIT_SPLICESITES, gsnap_db_folder = GSNAP_DB_FOLDER
-    output: bam =protected("aln/{sample}.bam") #, transIndel = temp("aln/{sample}.transIndel.bam") 
+    output: bam ="aln/{sample, \w+}.gsnap.bam" #, transIndel = temp("aln/{sample}.transIndel.bam") 
     threads: 10
     priority: 500
     log: "aln/{sample}.log"
@@ -158,9 +158,18 @@ rule gsnap_map:
         "mkdir -p {output.bam}.TMPDIR && rm -f {output.bam}.TMPDIR/* &&"
         "gsnap -t {threads} --gunzip -N 0 -s {input.iit_splice} -D {input.gsnap_db_folder} -d {params.gsnap_db} --read-group-id={wildcards.sample} --read-group-name={wildcards.sample} --format=sam {input.fastq} 2> {log} | "
 	"samtools view -@ {threads} -q 30 -S -O BAM /dev/stdin 2>> {log} |"
-	"samtools sort -@ {threads} -O BAM -T {output.bam}.TMPDIR /dev/stdin 2>> {log} | "
-        "~/anaconda2/envs/ngs/bin/python ~/app/transIndel/transIndel_build_RNA.py -i /dev/stdin -r {input.ref} -g {input.gtf} -o aln/{wildcards.sample}.bam 2>>{log} && "
+	"samtools sort -@ {threads} -O BAM -T {output.bam}.TMPDIR -o {output.bam} /dev/stdin &>> {log}"
+        
+        #"~/anaconda2/envs/ngs/bin/python ~/app/transIndel/transIndel_build_RNA.py -i /dev/stdin -r {input.ref} -g {input.gtf} -o aln/{wildcards.sample}.bam 2>>{log} && "
 	#"cp -fv aln/{wildcards.sample}.transIndel.bam {output.bam} &>> {log}"
+
+
+rule transIndel:
+     input: bam = "aln/{sample, \w+}.gsnap.bam", ref = REF, gtf = GTF
+     output: "aln/{sample}.bam"
+     threads: 10
+     log: "aln/{sample}.transIndel.log"
+     shell: "~/anaconda2/envs/ngs/bin/python ~/app/transIndel/transIndel_build_RNA.py -i {input.bam} -r {input.ref} -g {input.gtf} -o aln/{wildcards.sample}.bam &>{log}"
 
 rule gsnap_remap:
     input: fastq= get_files_str, snp_iit = "gmap_db/b_terrestris/b_terrestris.maps/snp.iit"
